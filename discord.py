@@ -9,6 +9,8 @@ from collections import defaultdict
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 SOURCE_CHANNEL_IDS = {1370376699442630749, 1381785444018028544}  # Set of allowed source channels
 TARGET_CHANNEL_ID = 1381601141959295082  # Channel where the bot posts the report
+COMMAND_RESPONSE_CHANNEL_ID = 1370376699442630749  # Channel for command responses
+LOG_CHANNEL_ID = 1381939349855273100  # Channel for debug logs
 PING_ROLE_ID = 1370329783703175168  # Role to ping in the main report
 SJW_ROLE_ID = 1370390270138384425  # Role to ping if Monarch/SJW is spotted
 
@@ -54,7 +56,7 @@ BOSS_EMOJIS = {
     "dae in": "<:dae_in:1381907460566155395>",
     "god speed": "<:godspeed:1381911161775329324>",
     "wesil": "🦊",
-    "monarch": "<:monarch:1381913119529369731>",
+    "monarch": "<:monarch:1381921265329373264>",
     "magma": "🌋"
 
 }
@@ -65,12 +67,30 @@ intents.guilds = True  # Enable guild intent for accessing guild information
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+async def log_to_discord(message):
+    """Send debug/console messages to Discord log channel."""
+    try:
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            # Truncate message if too long for Discord (2000 char limit)
+            if len(message) > 1900:
+                message = message[:1900] + "..."
+            await log_channel.send(f"```{message}```")
+    except Exception as e:
+        print(f"Failed to log to Discord: {e}")
+
+def enhanced_print(message):
+    """Print to console and send to Discord log channel."""
+    print(message)
+    if bot.is_ready():
+        asyncio.create_task(log_to_discord(message))
+
 async def scan_recent_messages_for_bosses():
     """Scans the last 10 minutes of messages from source channels to rebuild boss data."""
     now = datetime.utcnow() + timedelta(hours=2)
     cutoff_time = now - timedelta(minutes=10)
 
-    print("Scanning recent messages to rebuild boss data...")
+    enhanced_print("Scanning recent messages to rebuild boss data...")
 
     for channel_id in SOURCE_CHANNEL_IDS:
         channel = bot.get_channel(channel_id)
@@ -87,20 +107,31 @@ async def scan_recent_messages_for_bosses():
 
                 if boss_name and floor:
                     emoji = BOSS_EMOJIS.get(boss_name.lower(), "")
-                    print(f"Found recent report: Floor {floor}, Boss: {boss_name}")
+                    enhanced_print(f"Found recent report: Floor {floor}, Boss: {boss_name}")
 
                     # Track reports per floor
                     boss_data = reported_bosses[floor]
                     boss_data["reports"][boss_name] = boss_data["reports"].get(boss_name, 0) + 1
 
-                    # Update current boss based on reports
+                    # Update current boss based on reports (require 3+ for changes)
                     if len(boss_data["reports"]) == 1:
                         boss_data["current_boss"] = (boss_name, emoji)
-                    elif len(boss_data["reports"]) >= 2:
-                        most_reported_boss = max(boss_data["reports"], key=boss_data["reports"].get)
-                        boss_data["current_boss"] = (most_reported_boss, BOSS_EMOJIS.get(most_reported_boss.lower(), ""))
+                    else:
+                        # Find boss with 3+ reports
+                        boss_with_3_plus = None
+                        for boss, count in boss_data["reports"].items():
+                            if count >= 3:
+                                boss_with_3_plus = boss
+                                break
+                        
+                        if boss_with_3_plus:
+                            boss_data["current_boss"] = (boss_with_3_plus, BOSS_EMOJIS.get(boss_with_3_plus.lower(), ""))
+                        # If no boss has 3+ reports, keep the first reported boss
+                        elif not boss_data.get("current_boss"):
+                            first_boss = list(boss_data["reports"].keys())[0]
+                            boss_data["current_boss"] = (first_boss, BOSS_EMOJIS.get(first_boss.lower(), ""))
         except Exception as e:
-            print(f"Error scanning channel {channel_id}: {e}")
+            enhanced_print(f"Error scanning channel {channel_id}: {e}")
 
 async def post_report():
     """Posts a new report only at xx:44, then edits that report for the next 11 minutes."""
@@ -112,7 +143,7 @@ async def post_report():
 
     target_channel = bot.get_channel(TARGET_CHANNEL_ID)
     if not target_channel:
-        print("Target channel not found.")
+        enhanced_print("Target channel not found.")
         return
 
     # Determine if we should post a new report (only at xx:44)
@@ -129,22 +160,22 @@ async def post_report():
             if message_hour == current_hour:
                 # This is the correct message from this hour's xx:44 posting
                 await msg.edit(content=await build_report_content())
-                print(f"Edited existing report (ID: {latest_message_id})")
+                enhanced_print(f"Edited existing report (ID: {latest_message_id})")
                 return
             else:
                 # This message is from a previous hour, we need a new one
-                print("Report is from previous hour, need new report")
+                enhanced_print("Report is from previous hour, need new report")
                 should_post_new = True
 
         except discord.NotFound:
-            print("Existing report not found, will post new one and scan recent messages.")
+            enhanced_print("Existing report not found, will post new one and scan recent messages.")
             latest_message_id = None
             latest_message_timestamp = None
             # Scan recent messages to rebuild floor data
             await scan_recent_messages_for_bosses()
             should_post_new = True
         except discord.HTTPException as e:
-            print(f"Failed to edit message {latest_message_id}: {e}")
+            enhanced_print(f"Failed to edit message {latest_message_id}: {e}")
             if should_post_new:
                 latest_message_id = None
 
@@ -159,9 +190,9 @@ async def post_report():
             msg = await target_channel.send(report_content)
             latest_message_id = msg.id
             latest_message_timestamp = now
-            print(f"Posted new report (ID: {latest_message_id}) at {now.strftime('%H:%M')}")
+            enhanced_print(f"Posted new report (ID: {latest_message_id}) at {now.strftime('%H:%M')}")
         except discord.HTTPException as e:
-            print(f"Failed to send new message: {e}")
+            enhanced_print(f"Failed to send new message: {e}")
 
 async def build_report_content():
     """Builds the report content with current boss data."""
@@ -199,18 +230,24 @@ async def update_report():
     now = datetime.utcnow() + timedelta(hours=2)  # Adjust for your timezone
     current_hour = now.hour
 
-    print(f"Loop running at {now.strftime('%H:%M:%S')}")  # ✅ Debugging output
-
     # Post new report at xx:44 (once per hour)
     if now.minute == 44 and last_report_hour != current_hour:
-        print(f"Posting new report at {now.strftime('%H:%M:%S')}")
+        enhanced_print(f"Posting new report at {now.strftime('%H:%M:%S')}")
         await post_report()
         last_report_hour = current_hour  # ✅ Update the last report hour to prevent spam
 
-    # Continuously update existing report between xx:44 and xx:55
-    elif 44 <= now.minute <= 55:
-        print(f"Updating report at {now.strftime('%H:%M:%S')}")
-        await post_report()
+    # Continuously update existing report between xx:45 and xx:55 (ONLY edit, don't post new)
+    elif 45 <= now.minute <= 55 and latest_message_id:
+        target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+        if target_channel:
+            try:
+                msg = await target_channel.fetch_message(latest_message_id)
+                await msg.edit(content=await build_report_content())
+                enhanced_print(f"Edited existing report (ID: {latest_message_id})")
+            except discord.NotFound:
+                enhanced_print("Existing report not found")
+            except discord.HTTPException as e:
+                enhanced_print(f"Failed to edit message: {e}")
 
 @bot.event
 async def on_message(message):
@@ -222,39 +259,50 @@ async def on_message(message):
 
     # Log all messages for debugging
     if message.content.startswith('!'):
-        print(f"Command detected: {message.content} from {message.author} in channel {message.channel.id}")
+        enhanced_print(f"Command detected: {message.content} from {message.author} in channel {message.channel.id}")
+
+    # Process commands from designated channels
+    if message.channel.id in SOURCE_CHANNEL_IDS or message.channel.id == TARGET_CHANNEL_ID:
+        await bot.process_commands(message)
 
     if message.channel.id not in SOURCE_CHANNEL_IDS:
-        await bot.process_commands(message)  # Process commands even outside source channels
         return  # But don't process boss reports from other channels
 
-    print(f"Received message from {message.channel.id}: {message.content}")
+    enhanced_print(f"Received message from {message.channel.id}: {message.content}")
 
     boss_name = extract_boss_name(message.content)
     floor = extract_floor(message.content)
 
     if boss_name and floor:
         emoji = BOSS_EMOJIS.get(boss_name.lower(), "")  # Get emoji or empty string if not found
-        print(f"Detected Floor: {floor}, Boss: {boss_name}")
+        enhanced_print(f"Detected Floor: {floor}, Boss: {boss_name}")
 
         # Track reports per floor
         boss_data = reported_bosses[floor]
         boss_data["reports"][boss_name] = boss_data["reports"].get(boss_name, 0) + 1
 
-        # If only one report exists, update immediately
+        # If only one report exists, set it as current boss
         if len(boss_data["reports"]) == 1:
             boss_data["current_boss"] = (boss_name, emoji)
+            enhanced_print(f"Floor {floor}: First report for {boss_name}")
 
-        # If two or more people report a different boss, update to the new boss
-        elif len(boss_data["reports"]) >= 2:
-            most_reported_boss = max(boss_data["reports"], key=boss_data["reports"].get)
-            boss_data["current_boss"] = (most_reported_boss, BOSS_EMOJIS.get(most_reported_boss.lower(), ""))
+        # If 3 or more people report the same boss, update to that boss
+        elif boss_data["reports"][boss_name] >= 3:
+            # Only update if it's different from current boss
+            current_boss_name = boss_data["current_boss"][0] if boss_data["current_boss"] else None
+            if current_boss_name != boss_name:
+                boss_data["current_boss"] = (boss_name, emoji)
+                enhanced_print(f"Floor {floor}: Changed to {boss_name} (3+ reports: {boss_data['reports'][boss_name]})")
+            else:
+                enhanced_print(f"Floor {floor}: Confirmed {boss_name} (reports: {boss_data['reports'][boss_name]})")
+
+        # If multiple bosses reported but none have 3+ reports, keep current boss
+        else:
+            enhanced_print(f"Floor {floor}: Multiple reports but no boss has 3+ yet: {boss_data['reports']}")
 
         # Send separate Monarch alert message
         if boss_name.upper() == "MONARCH":
             await send_monarch_alert(floor)
-
-    await bot.process_commands(message)  # Allow command processing
 
 # Store floors for which SJW alerts have already been sent
 notified_floors = set()
@@ -269,33 +317,204 @@ async def send_monarch_alert(floor):
         await target_channel.send(monarch_alert)
         notified_floors.add(floor)  # Mark this floor as notified
 
+@bot.command(name="edit_message")
+async def edit_message_command(ctx, floor_boss_input: str = None):
+    """Manually edit a specific floor's boss in the report. Usage: !edit_message F70 Frioo or !edit F45 Gucci"""
+    global latest_message_id, latest_message_timestamp, reported_bosses
+    
+    enhanced_print(f"Edit message command received from {ctx.author} in channel {ctx.channel.id}")
+    
+    # Get command response channel
+    response_channel = bot.get_channel(COMMAND_RESPONSE_CHANNEL_ID)
+    if not response_channel:
+        response_channel = ctx.channel  # Fallback to current channel
+    
+    if ctx.channel.id not in SOURCE_CHANNEL_IDS and ctx.channel.id != TARGET_CHANNEL_ID:
+        await response_channel.send("❌ This command can only be used in designated channels.")
+        return
+    
+    if not floor_boss_input:
+        await response_channel.send("❌ Please specify floor and boss. Example: `!edit_message F70 Frioo` or `!edit F45 Gucci`")
+        return
+    
+    # Parse the input (e.g., "F70 Frioo" or "45 Gucci")
+    parts = floor_boss_input.strip().split(None, 1)  # Split into max 2 parts
+    if len(parts) != 2:
+        await response_channel.send("❌ Invalid format. Use: `!edit_message F70 Frioo` or `!edit F45 Gucci`")
+        return
+    
+    floor_part, boss_part = parts
+    
+    # Extract floor number
+    floor_match = re.search(r"(\d{2})", floor_part)
+    if not floor_match:
+        await response_channel.send("❌ Invalid floor format. Use F70, 70, Floor70, etc.")
+        return
+    
+    floor = floor_match.group(1)
+    if floor not in VALID_FLOORS:
+        await response_channel.send(f"❌ Invalid floor. Valid floors are: {', '.join(sorted(VALID_FLOORS, key=int))}")
+        return
+    
+    # Find boss name from aliases
+    boss_name = None
+    boss_part_lower = boss_part.lower().strip()
+    
+    for boss, aliases in BOSS_ALIASES.items():
+        for alias in aliases:
+            if boss_part_lower == alias.lower():
+                boss_name = boss.upper()
+                break
+        if boss_name:
+            break
+    
+    if not boss_name:
+        await response_channel.send(f"❌ Unknown boss '{boss_part}'. Check spelling or available bosses.")
+        return
+    
+    # Get emoji for the boss
+    emoji = BOSS_EMOJIS.get(boss_name.lower(), "")
+    
+    # Update the stored boss data
+    boss_data = reported_bosses[floor]
+    boss_data["current_boss"] = (boss_name, emoji)
+    boss_data["reports"] = {boss_name: 1}  # Reset reports to show this boss as confirmed
+    
+    enhanced_print(f"Manual edit: Floor {floor} set to {boss_name}")
+    
+    # Try to update the latest report message
+    target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+    if not target_channel:
+        await response_channel.send("❌ Target channel not found.")
+        return
+    
+    updated = False
+    
+    # Try to edit the latest message if it exists
+    if latest_message_id:
+        try:
+            msg = await target_channel.fetch_message(latest_message_id)
+            await msg.edit(content=await build_report_content())
+            updated = True
+            enhanced_print(f"Manual edit: Updated existing report (ID: {latest_message_id})")
+        except discord.NotFound:
+            enhanced_print("Manual edit: Latest message not found")
+        except discord.HTTPException as e:
+            enhanced_print(f"Manual edit: Failed to edit message: {e}")
+    
+    # If no latest message or edit failed, try to find and update recent reports
+    if not updated:
+        now = datetime.utcnow() + timedelta(hours=2)
+        cutoff_time = now - timedelta(minutes=30)  # Look for reports in last 30 minutes
+        
+        try:
+            async for message in target_channel.history(limit=50, after=cutoff_time):
+                if message.author == bot.user and "INFERNAL CASTLE SPAWNED" in message.content:
+                    try:
+                        await message.edit(content=await build_report_content())
+                        latest_message_id = message.id
+                        latest_message_timestamp = message.created_at.replace(tzinfo=None) + timedelta(hours=2)
+                        updated = True
+                        enhanced_print(f"Manual edit: Updated recent report (ID: {message.id})")
+                        break
+                    except discord.HTTPException as e:
+                        enhanced_print(f"Manual edit: Failed to edit message {message.id}: {e}")
+        except Exception as e:
+            enhanced_print(f"Manual edit: Error scanning for recent reports: {e}")
+    
+    # Send confirmation
+    if updated:
+        await response_channel.send(f"✅ **Floor {floor}** has been manually set to **{emoji} {boss_name}** and report updated!")
+        
+        # Send separate Monarch alert if needed
+        if boss_name.upper() == "MONARCH":
+            await send_monarch_alert(floor)
+    else:
+        await response_channel.send(f"✅ **Floor {floor}** has been set to **{emoji} {boss_name}** but no recent report found to update. Data will be used in next report.")
+
+@bot.command(name="edit")
+async def edit_command(ctx, *, floor_boss_input: str = None):
+    """Alias for edit_message command. Usage: !edit F70 Frioo"""
+    await edit_message_command(ctx, floor_boss_input)
+
 @bot.command(name="force_update")
 async def force_update_command(ctx):
-    """Manually force an update of the boss report."""
-    print(f"Force update command received from {ctx.author} in channel {ctx.channel.id}")
+    """Manually force an update of the boss report by scanning recent messages and updating all recent reports."""
+    global latest_message_id, latest_message_timestamp, reported_bosses
+    
+    enhanced_print(f"Force update command received from {ctx.author} in channel {ctx.channel.id}")
+    
+    # Get command response channel
+    response_channel = bot.get_channel(COMMAND_RESPONSE_CHANNEL_ID)
+    if not response_channel:
+        response_channel = ctx.channel  # Fallback to current channel
+    
     if ctx.channel.id in SOURCE_CHANNEL_IDS or ctx.channel.id == TARGET_CHANNEL_ID:
-        await post_report()
-        await ctx.send("✅ Report has been force updated!")
+        target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+        if not target_channel:
+            await response_channel.send("❌ Target channel not found.")
+            return
+
+        # Clear existing boss data and rebuild from recent messages
+        reported_bosses.clear()
+        enhanced_print("Force update: Scanning source channels for recent boss reports...")
+        
+        # Scan both source channels for the last 10 minutes
+        await scan_recent_messages_for_bosses()
+        
+        # Find all bot reports from the last 50 minutes and update them
+        now = datetime.utcnow() + timedelta(hours=2)
+        cutoff_time = now - timedelta(minutes=50)
+        updated_count = 0
+        
+        enhanced_print("Force update: Looking for recent bot reports to update...")
+        try:
+            async for message in target_channel.history(limit=100, after=cutoff_time):
+                if message.author == bot.user and "INFERNAL CASTLE SPAWNED" in message.content:
+                    try:
+                        await message.edit(content=await build_report_content())
+                        updated_count += 1
+                        enhanced_print(f"Force update: Updated report (ID: {message.id})")
+                        
+                        # Update the latest_message_id to the most recent one
+                        if not latest_message_id or message.created_at > latest_message_timestamp:
+                            latest_message_id = message.id
+                            latest_message_timestamp = message.created_at.replace(tzinfo=None) + timedelta(hours=2)
+                            
+                    except discord.HTTPException as e:
+                        enhanced_print(f"Force update: Failed to edit message {message.id}: {e}")
+        except Exception as e:
+            enhanced_print(f"Force update: Error scanning target channel: {e}")
+        
+        if updated_count > 0:
+            await response_channel.send(f"✅ Force update complete! Updated {updated_count} recent report(s) with latest boss data.")
+        else:
+            # If no recent reports found, post a new one
+            await post_report()
+            await response_channel.send("✅ No recent reports found. Posted new report with latest data!")
     else:
-        await ctx.send("❌ This command can only be used in designated channels.")
+        await response_channel.send("❌ This command can only be used in designated channels.")
 
 @bot.command(name="botuptime")
 async def uptime_command(ctx):
     """Provides a link for UptimeRobot to ping."""
-    print(f"Uptime command received from {ctx.author}")
+    enhanced_print(f"Uptime command received from {ctx.author}")
+    response_channel = bot.get_channel(COMMAND_RESPONSE_CHANNEL_ID) or ctx.channel
     replit_url = "https://replit.com/@abdolotte7/Spidy-Castle-Bot"
-    await ctx.send(f"Ping this link with UptimeRobot: {replit_url}")
+    await response_channel.send(f"Ping this link with UptimeRobot: {replit_url}")
 
 @bot.command(name="test")
 async def test_command(ctx):
     """Test command to check if bot is responding."""
-    print(f"Test command received from {ctx.author}")
-    await ctx.send("✅ Bot is working! Commands are functional.")
+    enhanced_print(f"Test command received from {ctx.author}")
+    response_channel = bot.get_channel(COMMAND_RESPONSE_CHANNEL_ID) or ctx.channel
+    await response_channel.send("✅ Bot is working! Commands are functional.")
 
 @bot.command(name="permissions")
 async def check_permissions(ctx):
     """Check bot permissions in current channel."""
-    print(f"Permission check requested by {ctx.author}")
+    enhanced_print(f"Permission check requested by {ctx.author}")
+    response_channel = bot.get_channel(COMMAND_RESPONSE_CHANNEL_ID) or ctx.channel
     perms = ctx.channel.permissions_for(ctx.guild.me)
     perm_list = []
 
@@ -314,7 +533,7 @@ async def check_permissions(ctx):
     else:
         perm_list.append("❌ Embed Links")
 
-    await ctx.send(f"**Bot Permissions:**\n" + "\n".join(perm_list))
+    await response_channel.send(f"**Bot Permissions:**\n" + "\n".join(perm_list))
 
 def extract_boss_name(message_content):
     """Extracts boss name from message using aliases."""
@@ -342,7 +561,7 @@ def extract_floor(message_content):
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    enhanced_print(f"Logged in as {bot.user}")
 
     if not update_report.is_running():  # ✅ Prevent multiple loops
         update_report.start()
